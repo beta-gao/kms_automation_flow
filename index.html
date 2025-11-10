@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Realtime KMS Monitor — Firestore Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root { --bg:#0f172a; --card:#111827; --muted:#94a3b8; --text:#e2e8f0; --accent:#22d3ee; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial; background: var(--bg); color: var(--text); }
+    header { padding: 24px 20px; border-bottom: 1px solid #1f2937; display:flex; align-items:center; gap:16px; }
+    header h1 { margin:0; font-size: clamp(18px, 2vw, 22px); font-weight:700; letter-spacing: .2px; }
+    header .badge { border:1px solid #1f2937; padding:6px 10px; border-radius:999px; font-size:12px; color: var(--muted); }
+    main { max-width: 1200px; margin: 0 auto; padding: 18px; display:grid; gap:16px; grid-template-columns: 1fr; }
+    .grid { display:grid; gap:16px; grid-template-columns: repeat(12, 1fr); }
+    .card { background: var(--card); border:1px solid #1f2937; border-radius: 16px; padding: 16px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    label { font-size:12px; color: var(--muted); display:block; margin-bottom:6px; }
+    select, input { appearance:none; background:#0b1220; color:var(--text); border:1px solid #1f2937; border-radius:10px; padding:10px 12px; min-width: 220px; }
+    .kpi { display:grid; gap:12px; grid-template-columns: repeat(12, 1fr); }
+    .kpi .item { grid-column: span 3; background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0)); border:1px solid #1f2937; border-radius: 16px; padding:14px; }
+    .kpi .label { color: var(--muted); font-size:12px; }
+    .kpi .value { font-size: 20px; font-weight: 700; }
+    .muted { color: var(--muted); }
+    .pill { border:1px solid #1f2937; padding:6px 10px; border-radius:999px; font-size:12px; }
+    .footer { color:#64748b; font-size: 12px; margin-top: 4px; }
+    .divider { height:1px; background:#1f2937; margin:8px 0 16px; }
+    .hint { font-size:12px; color:#93c5fd; }
+    .error { color:#fecaca; font-size:12px; }
+    canvas { width:100% !important; height: 320px !important; }
+    @media (max-width: 900px) { .kpi .item { grid-column: span 6; } }
+    @media (max-width: 600px) { .kpi .item { grid-column: span 12; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Realtime KMS Monitor — Firestore Dashboard</h1>
+    <span class="badge">Live</span>
+  </header>
+
+  <main>
+    <!-- Controls -->
+    <section class="card">
+      <div class="row">
+        <div>
+          <label for="projectStatus">Firebase Project</label>
+          <div id="projectStatus" class="pill">Not connected</div>
+        </div>
+        <div>
+          <label for="prodSelect">Product (prod_id)</label>
+          <select id="prodSelect">
+            <option value="" disabled selected>Loading…</option>
+          </select>
+        </div>
+        <div>
+          <label for="memberSelect">Member</label>
+          <select id="memberSelect">
+            <option value="" disabled selected>Select a product first</option>
+          </select>
+        </div>
+        <div>
+          <label for="limitInput">Points</label>
+          <input id="limitInput" type="number" value="500" min="20" step="20" />
+        </div>
+      </div>
+      <div class="footer">Structure assumed: <code>logs/{prod_id}/members/{member_name}/snapshots</code> with fields <code>time</code> (string), <code>time_utc</code> (server timestamp), <code>stocks</code>, <code>unit_sales</code>, <code>month_sales</code>, <code>sold_num</code>.</div>
+      <div class="hint">Tip: ensure your Firestore security rules allow web reads for these paths (or test in protected environment).</div>
+    </section>
+
+    <!-- KPIs -->
+    <section class="kpi">
+      <div class="item">
+        <div class="label">Latest stocks</div>
+        <div class="value" id="kpiStocks">—</div>
+      </div>
+      <div class="item">
+        <div class="label">Last unit sales</div>
+        <div class="value" id="kpiUnit">—</div>
+      </div>
+      <div class="item">
+        <div class="label">Total sold (API)</div>
+        <div class="value" id="kpiSoldNum">—</div>
+      </div>
+      <div class="item">
+        <div class="label">Month sales (API)</div>
+        <div class="value" id="kpiMonthSales">—</div>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="card">
+      <div class="row" style="align-items:center; justify-content:space-between;">
+        <div>
+          <strong>Stocks over time</strong>
+        </div>
+        <div class="muted" id="seriesMeta">—</div>
+      </div>
+      <div class="divider"></div>
+      <canvas id="stocksChart"></canvas>
+    </section>
+
+    <section class="card">
+      <div class="row" style="align-items:center; justify-content:space-between;">
+        <div>
+          <strong>Unit sales per tick</strong>
+        </div>
+        <div class="muted" id="seriesMeta2">—</div>
+      </div>
+      <div class="divider"></div>
+      <canvas id="unitChart"></canvas>
+    </section>
+
+    <section class="card">
+      <strong>Events</strong>
+      <div class="divider"></div>
+      <pre id="events" style="white-space: pre-wrap; font-size:12px; color:#93c5fd; margin:0; line-height:1.4; max-height:200px; overflow:auto;"></pre>
+    </section>
+  </main>
+
+  <!-- Firebase Web SDK (v10, modular) -->
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
+    import { getFirestore, collection, doc, getDocs, onSnapshot, query, orderBy, limit as qLimit } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
+
+    /**
+     * 1) Fill your Firebase web config here (from Project Settings → General → Your apps → Web app) 
+     *    This is public-safe config (NOT service account). Example:
+     *    const firebaseConfig = { apiKey:"...", authDomain:"...", projectId:"...", ... };
+     */
+    const firebaseConfig = {
+    apiKey: "AIzaSyAFODVuxBkpHtII50OSQ2ehmaTciabCl2k",
+    authDomain: "kms-monitor.firebaseapp.com",
+    projectId: "kms-monitor",
+    storageBucket: "kms-monitor.firebasestorage.app",
+    messagingSenderId: "708697277313",
+    appId: "1:708697277313:web:49b5791267bd6ca4119e80",
+    measurementId: "G-CJNH2MSDC3"
+    };
+
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // UI elements
+    const projectStatus = document.getElementById('projectStatus');
+    const prodSelect = document.getElementById('prodSelect');
+    const memberSelect = document.getElementById('memberSelect');
+    const limitInput = document.getElementById('limitInput');
+    const eventsEl = document.getElementById('events');
+
+    const kpiStocks = document.getElementById('kpiStocks');
+    const kpiUnit = document.getElementById('kpiUnit');
+    const kpiSoldNum = document.getElementById('kpiSoldNum');
+    const kpiMonthSales = document.getElementById('kpiMonthSales');
+    const seriesMeta = document.getElementById('seriesMeta');
+    const seriesMeta2 = document.getElementById('seriesMeta2');
+
+    // Chart instances
+    let stocksChart, unitChart;
+
+    function log(msg){
+      const t = new Date().toLocaleTimeString();
+      eventsEl.textContent = `[${t}] ${msg}\n` + eventsEl.textContent;
+    }
+
+    // Format FS Timestamp or ISO string
+    function asLabel(ts) {
+      try {
+        if (ts && typeof ts.toDate === 'function') {
+          return ts.toDate().toLocaleString();
+        }
+        if (typeof ts === 'string') return ts;
+      } catch(e) {}
+      return '';
+    }
+
+    // Load top-level products (logs)
+    async function loadProducts(){
+      try {
+        const snap = await getDocs(collection(db, 'logs'));
+        prodSelect.innerHTML = '';
+        if (snap.empty) {
+          const opt = document.createElement('option');
+          opt.value = ''; opt.textContent = 'No products found'; opt.disabled = true; opt.selected = true;
+          prodSelect.appendChild(opt);
+          return;
+        }
+        const opt0 = document.createElement('option');
+opt0.value = '';
+opt0.textContent = 'Select product';
+opt0.disabled = true;
+opt0.selected = true;
+prodSelect.appendChild(opt0);
+        snap.forEach(doc => {
+          const opt = document.createElement('option');
+          opt.value = doc.id; opt.textContent = doc.id;
+          prodSelect.appendChild(opt);
+        });
+        log(`Loaded ${snap.size} products`);
+      } catch(e){
+        log(`Error loading products: ${e.message}`);
+      }
+    }
+
+    async function loadMembers(prodId){
+      memberSelect.innerHTML = '';
+      const opt0 = document.createElement('option');
+opt0.value = '';
+opt0.textContent = 'Loading members…';
+opt0.disabled = true;
+opt0.selected = true;
+memberSelect.appendChild(opt0);
+      try {
+        const membersCol = collection(db, 'logs', String(prodId), 'members');
+        const snap = await getDocs(membersCol);
+        memberSelect.innerHTML = '';
+        if (snap.empty){
+          const o = document.createElement('option');
+          o.value = ''; o.textContent = 'No members yet'; o.disabled = true; o.selected = true;
+          memberSelect.appendChild(o);
+          return;
+        }
+        const o1 = document.createElement('option');
+        o1.value = ''; o1.textContent = 'Select member'; o1.disabled = true; o1.selected = true;
+        memberSelect.appendChild(o1);
+        snap.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.id; opt.textContent = d.id;
+          memberSelect.appendChild(opt);
+        });
+        log(`Loaded ${snap.size} members for ${prodId}`);
+      } catch(e) {
+        log(`Error loading members: ${e.message}`);
+      }
+    }
+
+    function ensureCharts(){
+      const ctx1 = document.getElementById('stocksChart');
+      const ctx2 = document.getElementById('unitChart');
+      if (!stocksChart){
+        stocksChart = new Chart(ctx1, {
+          type: 'line',
+          data: { labels: [], datasets: [{ label: 'Stocks', data: [], tension: 0.25 }]},
+          options: { responsive:true, scales:{ x:{ ticks:{ color:'#94a3b8' } }, y:{ ticks:{ color:'#94a3b8' } } }, plugins:{ legend:{ labels:{ color:'#cbd5e1' } } } }
+        });
+      }
+      if (!unitChart){
+        unitChart = new Chart(ctx2, {
+          type: 'bar',
+          data: { labels: [], datasets: [{ label: 'Unit sales (+ means sold)', data: [] }]},
+          options: { responsive:true, scales:{ x:{ ticks:{ color:'#94a3b8' } }, y:{ ticks:{ color:'#94a3b8' } } }, plugins:{ legend:{ labels:{ color:'#cbd5e1' } } } }
+        });
+      }
+    }
+
+    let unsubscribe = null;
+
+    function subscribeSeries(prodId, member, pointLimit){
+      if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+      ensureCharts();
+
+      // Reset
+      stocksChart.data.labels = []; stocksChart.data.datasets[0].data = [];
+      unitChart.data.labels = []; unitChart.data.datasets[0].data = [];
+      stocksChart.update(); unitChart.update();
+
+      const qRef = query(
+        collection(db, 'logs', String(prodId), 'members', String(member), 'snapshots'),
+        orderBy('time_utc', 'asc'),
+        qLimit(Number(pointLimit) || 500)
+      );
+
+      unsubscribe = onSnapshot(qRef, (snap) => {
+        const labels = []; const stocks = []; const units = [];
+        let latest = null;
+        snap.forEach(d => {
+          const x = d.data();
+          labels.push(asLabel(x.time_utc || x.time));
+          stocks.push(Number(x.stocks || 0));
+          units.push(x.unit_sales == null ? 0 : Number(x.unit_sales));
+          latest = x;
+        });
+
+        stocksChart.data.labels = labels;
+        stocksChart.data.datasets[0].data = stocks;
+        stocksChart.update('none');
+
+        unitChart.data.labels = labels;
+        unitChart.data.datasets[0].data = units;
+        unitChart.update('none');
+
+        if (latest){
+          kpiStocks.textContent = Number(latest.stocks || 0);
+          kpiUnit.textContent = (latest.unit_sales == null ? '—' : Number(latest.unit_sales));
+          kpiSoldNum.textContent = (latest.sold_num == null ? '—' : Number(latest.sold_num));
+          kpiMonthSales.textContent = (latest.month_sales == null ? '—' : Number(latest.month_sales));
+          seriesMeta.textContent = `${prodId} / ${member} — ${labels.length} points`;
+          seriesMeta2.textContent = `${prodId} / ${member} — ${labels.length} points`;
+        }
+
+        log(`Realtime update: ${snap.size} points`);
+      }, (err) => {
+        log(`onSnapshot error: ${err.message}`);
+      });
+    }
+
+    // Wire up UI
+    prodSelect.addEventListener('change', (e) => {
+      const prod = e.target.value;
+      if (!prod) return;
+      loadMembers(prod);
+      kpiStocks.textContent = '—';
+      kpiUnit.textContent = '—';
+      kpiSoldNum.textContent = '—';
+      kpiMonthSales.textContent = '—';
+    });
+
+    memberSelect.addEventListener('change', () => {
+      const prod = prodSelect.value; const member = memberSelect.value; const lim = limitInput.value;
+      if (prod && member) subscribeSeries(prod, member, lim);
+    });
+
+    limitInput.addEventListener('change', () => {
+      const prod = prodSelect.value; const member = memberSelect.value; const lim = limitInput.value;
+      if (prod && member) subscribeSeries(prod, member, lim);
+    });
+
+    // Init
+    projectStatus.textContent = `Project: ${firebaseConfig.projectId || 'unknown'}`;
+    loadProducts();
+  </script>
+</body>
+</html>
